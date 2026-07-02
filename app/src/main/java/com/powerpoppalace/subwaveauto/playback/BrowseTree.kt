@@ -1,0 +1,141 @@
+package com.powerpoppalace.subwaveauto.playback
+
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService.LibraryParams
+import androidx.media3.session.MediaLibraryService.MediaLibrarySession
+import androidx.media3.session.MediaSession
+import com.google.common.collect.ImmutableList
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import com.powerpoppalace.subwaveauto.net.StationApi
+
+// §1 contract values (ANDROID_AUTO_PLAN.md) — BrowseTree owns them; PlaybackService
+// (same package) and WP4's UI reference them from here.
+const val ROOT_ID = "subwave_root"
+const val LIVE_ITEM_ID = "subwave_live"
+
+/**
+ * The fully-formed live [MediaItem], per the §1 invariants: mediaId [LIVE_ITEM_ID],
+ * a FRESH cache-busted stream URI on every call (never reuse an old `?t=`), explicit
+ * MP3 mime type (skip content sniffing), radio-station metadata.
+ *
+ * Pure string/builder work — no I/O. Shared by [BrowseTree]'s callbacks and by
+ * PlaybackService's live-edge reload path (its `freshLiveItem()` delegates here).
+ */
+internal fun liveMediaItem(api: StationApi): MediaItem =
+    MediaItem.Builder()
+        .setMediaId(LIVE_ITEM_ID)
+        .setUri(api.streamUrl())
+        .setMimeType(MimeTypes.AUDIO_MPEG)
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle("SUB/WAVE")
+                .setArtist("Live broadcast")
+                .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+                .setIsPlayable(true)
+                .setIsBrowsable(false)
+                .build(),
+        )
+        .build()
+
+/**
+ * Android Auto browse tree (ANDROID_AUTO_PLAN.md §2 WP3): a browsable root
+ * ([ROOT_ID], "SUB/WAVE") containing exactly one playable item ([LIVE_ITEM_ID],
+ * the live stream).
+ *
+ * All callbacks are fast and non-blocking — pure builder work, no network. Browse
+ * artwork is deliberately skipped (AA shows the app icon by default); live cover
+ * art arrives later via [LiveMetadata] once playback starts.
+ *
+ * Base-URL change: [api] is a mutable `var` (deliberate, minimal deviation from
+ * §1's `private val`) — the session callback is fixed at session-build time, so the
+ * service can't swap in a new BrowseTree on a URL change without rebuilding the
+ * whole session. Instead PlaybackService's StationPrefs listener assigns the
+ * rebuilt StationApi here (one line), and every subsequent callback resolves
+ * against the new station. Only ever mutated from the main thread (the prefs
+ * listener), same thread the session callbacks arrive on.
+ */
+class BrowseTree(var api: StationApi) : MediaLibrarySession.Callback {
+
+    /** Browsable root — not playable, contains the single live item. */
+    internal fun rootItem(): MediaItem =
+        MediaItem.Builder()
+            .setMediaId(ROOT_ID)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle("SUB/WAVE")
+                    .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
+                    .setIsBrowsable(true)
+                    .setIsPlayable(false)
+                    .build(),
+            )
+            .build()
+
+    /** The live item as shown in the browse list — [liveMediaItem] plus the "Live radio" subtitle. */
+    internal fun browseLiveItem(): MediaItem {
+        val item = liveMediaItem(api)
+        return item.buildUpon()
+            .setMediaMetadata(
+                item.mediaMetadata.buildUpon()
+                    .setSubtitle("Live radio")
+                    .build(),
+            )
+            .build()
+    }
+
+    /**
+     * The resolution seam behind [onAddMediaItems] (kept `internal` so plain unit
+     * tests exercise it without constructing a MediaSession/ControllerInfo):
+     * controllers — AA always — send bare mediaIds with NO URI, so EVERY requested
+     * item maps to the fully-formed live item with a fresh cache-busted stream URI.
+     */
+    internal fun resolveMediaItems(requested: List<MediaItem>): MutableList<MediaItem> =
+        requested.map { liveMediaItem(api) }.toMutableList()
+
+    override fun onGetLibraryRoot(
+        session: MediaLibrarySession,
+        browser: MediaSession.ControllerInfo,
+        params: LibraryParams?,
+    ): ListenableFuture<LibraryResult<MediaItem>> =
+        Futures.immediateFuture(LibraryResult.ofItem(rootItem(), params))
+
+    override fun onGetChildren(
+        session: MediaLibrarySession,
+        browser: MediaSession.ControllerInfo,
+        parentId: String,
+        page: Int,
+        pageSize: Int,
+        params: LibraryParams?,
+    ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
+        when (parentId) {
+            ROOT_ID -> Futures.immediateFuture(
+                LibraryResult.ofItemList(ImmutableList.of(browseLiveItem()), params),
+            )
+            // The live item is a leaf — an (unexpected) children request yields an empty list.
+            LIVE_ITEM_ID -> Futures.immediateFuture(
+                LibraryResult.ofItemList(ImmutableList.of(), params),
+            )
+            else -> Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
+        }
+
+    override fun onGetItem(
+        session: MediaLibrarySession,
+        browser: MediaSession.ControllerInfo,
+        mediaId: String,
+    ): ListenableFuture<LibraryResult<MediaItem>> =
+        when (mediaId) {
+            LIVE_ITEM_ID -> Futures.immediateFuture(LibraryResult.ofItem(browseLiveItem(), null))
+            ROOT_ID -> Futures.immediateFuture(LibraryResult.ofItem(rootItem(), null))
+            else -> Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
+        }
+
+    override fun onAddMediaItems(
+        mediaSession: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        mediaItems: MutableList<MediaItem>,
+    ): ListenableFuture<MutableList<MediaItem>> =
+        Futures.immediateFuture(resolveMediaItems(mediaItems))
+}

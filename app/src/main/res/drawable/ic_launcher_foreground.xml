@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder disc-mark: a simple record/disc with a center hole (final art is not a blocker). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:pivotX="54" android:pivotY="54">
+        <path
+            android:fillColor="#F5C518"
+            android:pathData="M54,24a30,30 0 1,0 0.001,0z" />
+        <path
+            android:fillColor="#0B0B12"
+            android:pathData="M54,40a14,14 0 1,0 0.001,0z" />
+        <path
+            android:fillColor="#F5C518"
+            android:pathData="M54,50a4,4 0 1,0 0.001,0z" />
+    </group>
+</vector>
