@@ -11,10 +11,10 @@ Store, using AA's developer "Unknown sources" toggle.
 A companion to [SUB/WAVE](https://github.com/perminder-klair/subwave) — the
 self-hosted AI-DJ internet radio station. This is an **independent
 Kotlin/Gradle project** with zero coupling to SUB/WAVE's Expo mobile app
-(different package id, `com.powerpoppalace.subwaveauto`; no shared code or
+(different package id; no shared code or
 build) and **zero server-side changes**: it consumes any station's existing
 public API (`/stream.mp3`, `/api/now-playing`). Point it at your own SUB/WAVE
-instance via the in-app station URL (default: the Power Pop Palace).
+instance via the in-app station URL.
 
 Developed as a top-level subproject inside a station operator's fork and
 extracted here as a standalone repo (MIT, matching upstream). Offered for
@@ -58,8 +58,7 @@ it exists nowhere else.
 - `playback/LiveMetadata.kt` — polls `/api/now-playing` every 5 s while
   playing; swaps title/artist/album/cover into the session with no audio gap.
 - `net/StationApi.kt` (+ `prefs/StationPrefs.kt`) — HTTP client for the
-  station API; user-editable base URL (default radio.powerpoppalace.com,
-  https-required except private hosts).
+  station API; user-editable base URL (https-required except private hosts).
 - `ui/MainActivity.kt` — minimal Compose phone UI: play/pause, now-playing,
   base-URL setting, and the AA unknown-sources hint.
 
