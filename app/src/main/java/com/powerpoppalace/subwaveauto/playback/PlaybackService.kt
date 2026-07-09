@@ -6,10 +6,12 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Metadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.extractor.metadata.icy.IcyInfo
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import com.powerpoppalace.subwaveauto.net.StationApi
@@ -102,6 +104,13 @@ class PlaybackService : MediaLibraryService() {
 
         liveMetadata = LiveMetadata(player, stationApi, serviceScope)
         liveMetadata.start()
+        // ICY in-band metadata: ExoPlayer requests `Icy-MetaData: 1` on progressive
+        // streams by default and surfaces IcyInfo at the PRESENTATION time of the
+        // bytes it rode in on — i.e. when the listener actually hears the track
+        // change. LiveMetadata uses it as the authoritative swap signal (immune to
+        // buffer lag from accumulated short pauses / rebuffers), with the 5s poll
+        // demoted to snapshot-cache warmer + fallback for ICY-less proxies.
+        player.addListener(icyListener)
 
         // Base-URL change (§1 construction contract): stop playback, rebuild the API
         // client, swap in a fresh live item. Left unprepared — the next play() goes
@@ -147,6 +156,23 @@ class PlaybackService : MediaLibraryService() {
      * 3 s with a fresh cache-busted item. A second consecutive failure (no READY in
      * between) is NOT retried — the error state surfaces to controllers (AA shows it).
      */
+    /**
+     * Relay ICY StreamTitle events to [LiveMetadata]. One IcyInfo entry per
+     * metadata event; anything else (id3, emsg) is ignored. Main-thread callback
+     * (media3 contract) — LiveMetadata launches its own IO work.
+     */
+    private val icyListener = object : Player.Listener {
+        override fun onMetadata(metadata: Metadata) {
+            for (i in 0 until metadata.length()) {
+                val entry = metadata.get(i)
+                if (entry is IcyInfo) {
+                    liveMetadata.onIcyStreamTitle(entry.title)
+                    return
+                }
+            }
+        }
+    }
+
     private val retryListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             if (retriedAfterError) return // second consecutive failure — surface the error state
