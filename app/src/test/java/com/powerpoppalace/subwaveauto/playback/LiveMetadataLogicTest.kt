@@ -170,6 +170,54 @@ class LiveMetadataLogicTest {
         assertEquals("Second", cache.latest()?.title)
     }
 
+    // --- planMetaPush: identity vs art gating (the AA-artwork fix) ---
+
+    private val T1 = "Starry Eyes" to "The Records"
+    private val T2 = "Teenarama" to "The Records"
+
+    @Test
+    fun plan_identityChange_setsIdentity_andArtWhenKnown() {
+        val p = planMetaPush(T2, T1, artKnown = true, newArtUrl = "a/2.jpg", lastAppliedArtUrl = "a/1.jpg")
+        assertTrue(p.setIdentity)
+        assertTrue(p.setArt)
+        assertTrue(!p.isNoop)
+    }
+
+    @Test
+    fun plan_sameTuple_sameArt_isNoop() {
+        val p = planMetaPush(T1, T1, artKnown = true, newArtUrl = "a/1.jpg", lastAppliedArtUrl = "a/1.jpg")
+        assertTrue(!p.setIdentity)
+        assertTrue(!p.setArt)
+        assertTrue(p.isNoop)
+    }
+
+    @Test
+    fun plan_icyMiss_neverTouchesArt_evenOnIdentityChange() {
+        // artKnown=false (snapshot miss) → art carried forward, never blanked.
+        val p = planMetaPush(T2, T1, artKnown = false, newArtUrl = null, lastAppliedArtUrl = "a/1.jpg")
+        assertTrue(p.setIdentity)
+        assertTrue(!p.setArt)
+    }
+
+    @Test
+    fun plan_pollEnrichment_sameTuple_newArt_setsArtOnly() {
+        // ICY owns identity; the poll upgrades art for the CURRENT track (recovers
+        // an ICY-miss cover or a transient fetch failure) without moving identity.
+        val p = planMetaPush(T1, T1, artKnown = true, newArtUrl = "a/1.jpg", lastAppliedArtUrl = null)
+        assertTrue(!p.setIdentity)
+        assertTrue(p.setArt)
+    }
+
+    @Test
+    fun plan_trackWithNoCover_clearsAppliedArt_thenNoops() {
+        // Authoritative "no art" (artUrl null) while a cover is applied → clear it.
+        val p = planMetaPush(T2, T1, artKnown = true, newArtUrl = null, lastAppliedArtUrl = "a/1.jpg")
+        assertTrue(p.setArt)
+        // ...and once cleared, a repeat is a no-op (null == null).
+        val q = planMetaPush(T2, T2, artKnown = true, newArtUrl = null, lastAppliedArtUrl = null)
+        assertTrue(!q.setArt)
+    }
+
     // --- displayArtist: station branding on the artist line ---
 
     @Test
