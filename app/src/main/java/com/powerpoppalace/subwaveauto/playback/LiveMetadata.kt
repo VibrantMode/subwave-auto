@@ -348,33 +348,36 @@ class LiveMetadata(
      * @param artKnown whether `np` carries authoritative album/art. False on an ICY
      *   snapshot-miss — art is then left untouched (carried forward), never blanked.
      */
-    private suspend fun pushMeta(np: NowPlaying, artKnown: Boolean) {
-        val tuple = nowPlayingTuple(np)
-        val plan = planMetaPush(tuple, lastTuple, artKnown, np.artUrl, lastAppliedArtUrl)
-        if (plan.isNoop) return
-
-        // Artwork bytes on IO (inside StationApi), BEFORE touching the player — only
-        // when we're (re)writing art. Best-effort: a null result (fetch failed,
-        // >1MB, 404) still lets AA render from artworkUri below.
-        val art = if (plan.setArt && np.artUrl != null) fetchArtCached(np.artUrl) else null
-
-        // Whether the art write actually happened (vetoed by the staleness guard
-        // below) — decides the lastAppliedArtUrl commit after the Main block.
-        var artApplied = false
-
-        // Player access only on the main thread (media3 threading contract).
+    private suspend fun pushMeta(np: NowPlaying, artKnown: Boolean): Unit =
+        // Pin the ENTIRE body to the main thread: the class scope is already
+        // Dispatchers.Main, but confining it explicitly makes every read/write of
+        // lastTuple / lastAppliedArtUrl single-threaded and race-free regardless of
+        // caller. fetchArtCached still offloads its network work to IO internally —
+        // that inner suspension is the one interleave point, handled below.
         withContext(Dispatchers.Main.immediate) {
+            val tuple = nowPlayingTuple(np)
+            val plannedLast = lastTuple
+            val plan = planMetaPush(tuple, plannedLast, artKnown, np.artUrl, lastAppliedArtUrl)
+            if (plan.isNoop) return@withContext
+
+            // Artwork bytes (fetchArtCached hops to IO and back), ONLY when we're
+            // (re)writing art. A null result — fetch failed, >1MB, 404 — still lets
+            // AA render from artworkUri below. This is the sole suspension point.
+            val art = if (plan.setArt && np.artUrl != null) fetchArtCached(np.artUrl) else null
+
+            // Supersession guard: the art fetch suspended, so a NEWER identity (an
+            // ICY track change applied by another push) may have landed meanwhile.
+            // If identity has moved to a DIFFERENT track than this push is for, we're
+            // stale — bail rather than resurrect an old track or paint its cover onto
+            // the new one. `lastTuple == tuple` means our own identity is already
+            // current (a same-track art refresh), so proceed. When we didn't fetch
+            // (no suspension) lastTuple is unchanged, so this never false-bails.
+            if (lastTuple != plannedLast && lastTuple != tuple) return@withContext
             if (player.mediaItemCount == 0) return@withContext
-            // Staleness guard: the art fetch above suspends, so a NEWER identity
-            // (an ICY track change) can land while we're fetching. Don't paint a
-            // now-stale cover onto a track it doesn't belong to. Only art-only
-            // upgrades are at risk — an identity-carrying push IS the current track.
-            val staleArt = plan.setArt && !plan.setIdentity && lastTuple != tuple
-            val writeArt = plan.setArt && !staleArt
 
             val current = player.getMediaItemAt(0)
-            // buildUpon() copies the current metadata, so any field we DON'T touch
-            // is carried forward untouched (this is what preserves art on an ICY miss).
+            // buildUpon() copies the current metadata, so any field we DON'T touch is
+            // carried forward untouched — this is what preserves art on an ICY miss.
             val meta = current.mediaMetadata.buildUpon() // keep MEDIA_TYPE_RADIO_STATION / isPlayable
             if (plan.setIdentity) {
                 meta.setTitle(np.title ?: np.stationName ?: "SUB/WAVE")
@@ -383,41 +386,38 @@ class LiveMetadata(
                     .setArtist(displayArtist(np.artist, np.stationName) ?: "Live broadcast")
                     .setStation(np.stationName)
             }
-            if (writeArt) {
+            if (plan.setArt) {
                 // artworkUri (the cover's HTTP URL) is the RELIABLE path on Android
                 // Auto: AA fetches it itself, so it isn't subject to the Binder
                 // transaction size limit that silently drops a large artworkData
                 // bitmap — and it rescues covers over MAX_METADATA_ART_BYTES that
                 // fetchArtCached refuses to inline. artworkData stays as the
                 // immediate/offline bitmap for the notification + BT/AVRCP. Set or
-                // clear BOTH so a track with no cover doesn't keep the last one.
+                // clear BOTH (art/np.artUrl may be null) so a track with no cover
+                // doesn't keep the last one.
                 meta.setAlbumTitle(np.album)
                     .setArtworkData(art, if (art != null) MediaMetadata.PICTURE_TYPE_FRONT_COVER else null)
                     .setArtworkUri(np.artUrl?.let { runCatching { Uri.parse(it) }.getOrNull() })
-                artApplied = true
             }
             // Same URI, new metadata → media3 keeps playback uninterrupted (the URI
             // is unchanged, so replaceMediaItem is a metadata-only update).
             // FALLBACK (plan §4 risk table): if device QA (WP6 matrix #4) hears an
             // audio glitch on this path, switch to the ForwardingPlayer-metadata
             // pattern instead — override getMediaMetadata() on the service's
-            // LiveEdgePlayer and emit onMediaMetadataChanged — and document which
-            // shipped.
+            // LiveEdgePlayer and emit onMediaMetadataChanged — and document which shipped.
             player.replaceMediaItem(
                 0,
                 current.buildUpon().setMediaMetadata(meta.build()).build(),
             )
-        }
 
-        if (plan.setIdentity) lastTuple = tuple
-        // Mark the art applied after ONE attempt (success or fail) so a permanently
-        // un-inlinable cover — >1MB, 404 — can't spin the poll re-applying it every
-        // tick; AA already has the URI from this pass. A transient failure re-applies
-        // on the next genuine art change (new track / new cover URL). A stale write
-        // vetoed by the guard leaves lastAppliedArtUrl untouched so the next poll
-        // re-upgrades to the correct cover.
-        if (artApplied) lastAppliedArtUrl = np.artUrl
-    }
+            // Commit state on Main (past the guard, so never for a superseded push).
+            if (plan.setIdentity) lastTuple = tuple
+            // Mark art applied after this ONE attempt (success, or clear-to-null, or a
+            // failed inline whose URI we still set) so a permanently un-inlinable cover
+            // — >1MB, 404 — can't spin the poll re-applying it every tick; AA already
+            // has the URI from this pass. A genuinely new cover URL re-applies normally.
+            if (plan.setArt) lastAppliedArtUrl = np.artUrl
+        }
 
     /**
      * Artwork bytes for [MediaMetadata.artworkData]: LRU-cached by URL; fetched via
