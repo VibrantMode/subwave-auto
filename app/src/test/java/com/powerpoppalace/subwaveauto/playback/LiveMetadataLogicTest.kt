@@ -93,6 +93,83 @@ class LiveMetadataLogicTest {
         assertTrue(MAX_METADATA_ART_BYTES < com.powerpoppalace.subwaveauto.net.StationApi.MAX_ART_BYTES)
     }
 
+    // --- parseIcyStreamTitle: ICY StreamTitle → (artist, title) ---
+
+    @Test
+    fun icyParse_artistDashTitle_splitsOnFirstSeparator() {
+        assertEquals(Pair("The Records", "Starry Eyes"), parseIcyStreamTitle("The Records - Starry Eyes"))
+    }
+
+    @Test
+    fun icyParse_titleContainingSeparator_keepsItInTheTitle() {
+        // Split on the FIRST " - ": everything after belongs to the title.
+        assertEquals(
+            Pair("Fountains of Wayne", "Stacy's Mom - Single Version"),
+            parseIcyStreamTitle("Fountains of Wayne - Stacy's Mom - Single Version"),
+        )
+    }
+
+    @Test
+    fun icyParse_noSeparator_wholeStringIsTitle() {
+        assertEquals(Pair(null, "News Flash"), parseIcyStreamTitle("News Flash"))
+    }
+
+    @Test
+    fun icyParse_blankAndNull_returnNull() {
+        assertNull(parseIcyStreamTitle(null))
+        assertNull(parseIcyStreamTitle(""))
+        assertNull(parseIcyStreamTitle("   "))
+        assertNull(parseIcyStreamTitle(" - ")) // separator with empty halves
+    }
+
+    @Test
+    fun icyParse_trimsWhitespaceAroundBothHalves() {
+        assertEquals(Pair("Nick Lowe", "Cruel to Be Kind"), parseIcyStreamTitle("  Nick Lowe -   Cruel to Be Kind  "))
+    }
+
+    // --- icyKey + SnapshotCache: ICY → cached snapshot matching ---
+
+    @Test
+    fun icyKey_caseAndWhitespaceInsensitive() {
+        assertEquals(icyKey("Starry Eyes", "The Records"), icyKey("  starry eyes ", "THE RECORDS"))
+        assertNotEquals(icyKey("Starry Eyes", "The Records"), icyKey("Teenarama", "The Records"))
+    }
+
+    @Test
+    fun snapshotCache_exactTupleMatch_returnsSnapshotWithArt() {
+        val cache = SnapshotCache(MAX_SNAPSHOT_CACHE_ENTRIES)
+        cache.put(np())
+        val hit = cache.find("starry eyes", "the records") // ICY casing differs
+        assertEquals("https://cdn.example.com/covers/abc.jpg", hit?.artUrl)
+        assertEquals("Shades in Bed", hit?.album)
+    }
+
+    @Test
+    fun snapshotCache_titleOnlyFallback_whenIcyArtistFormattingDrifts() {
+        val cache = SnapshotCache(MAX_SNAPSHOT_CACHE_ENTRIES)
+        cache.put(np())
+        // ICY said "Records, The" — exact tuple misses, title-only fallback hits.
+        assertEquals("Shades in Bed", cache.find("Starry Eyes", "Records, The")?.album)
+        assertNull(cache.find("Some Other Song", "Records, The"))
+    }
+
+    @Test
+    fun snapshotCache_evictsEldestBeyondCap() {
+        val cache = SnapshotCache(MAX_SNAPSHOT_CACHE_ENTRIES)
+        for (i in 1..9) cache.put(np(title = "Song $i", artist = "Artist $i"))
+        assertEquals(8, cache.size())
+        assertNull(cache.find("Song 1", "Artist 1")) // eldest evicted
+        assertEquals("Shades in Bed", cache.find("Song 9", "Artist 9")?.album)
+    }
+
+    @Test
+    fun snapshotCache_latest_isMostRecentlyTouched() {
+        val cache = SnapshotCache(MAX_SNAPSHOT_CACHE_ENTRIES)
+        cache.put(np(title = "First"))
+        cache.put(np(title = "Second"))
+        assertEquals("Second", cache.latest()?.title)
+    }
+
     // --- displayArtist: station branding on the artist line ---
 
     @Test
