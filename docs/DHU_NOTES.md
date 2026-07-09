@@ -68,5 +68,5 @@ via the legacy intent filter for a sideloaded app) is confirmed working on real
 hardware: launcher icon present, browse root loads, playback starts, live
 metadata + cover art render and track song changes, transport shows play/pause
 only (seek/skip stripped). Artist line carries the station branding
-("<artist> • Power Pop Palace"). The legacy `MediaBrowserServiceCompat`
+("<artist> • <station name>"). The legacy `MediaBrowserServiceCompat`
 fallback documented in the plan was NOT needed.
