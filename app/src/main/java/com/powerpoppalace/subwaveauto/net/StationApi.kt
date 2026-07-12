@@ -11,6 +11,22 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 /**
+ * True when a fetched artwork response can plausibly be image bytes. A station's
+ * cover endpoint is supposed to serve images, but a MISSING cover can come back
+ * as HTTP 200 + a JSON error envelope (Navidrome's Subsonic "Artwork not found",
+ * relayed by older SUB/WAVE controllers) — caching those bytes as
+ * `MediaMetadata.artworkData` gives the session an undecodable blob and the
+ * track renders artless everywhere. Accept image types and generic/absent ones
+ * (some servers omit Content-Type or say octet-stream for valid images); reject
+ * anything declaring a non-image type. Pure, JVM-tested.
+ */
+internal fun isLikelyImageContentType(contentType: String?): Boolean {
+    val ct = contentType?.substringBefore(';')?.trim()?.lowercase()
+    if (ct.isNullOrEmpty()) return true
+    return ct.startsWith("image/") || ct == "application/octet-stream"
+}
+
+/**
  * Tiny HTTP client for one SUB/WAVE station.
  *
  * Contract (ANDROID_AUTO_PLAN.md §1): every failure path — network error, non-2xx,
@@ -56,6 +72,10 @@ class StationApi(
             val request = Request.Builder().url(httpUrl).get().build()
             client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) return@withContext null
+                // A 200 whose body isn't an image (JSON error envelope for a
+                // missing cover) must not become artwork bytes — see
+                // isLikelyImageContentType.
+                if (!isLikelyImageContentType(resp.header("Content-Type"))) return@withContext null
                 val body = resp.body ?: return@withContext null
                 val declared = body.contentLength()
                 if (declared > MAX_ART_BYTES) return@withContext null

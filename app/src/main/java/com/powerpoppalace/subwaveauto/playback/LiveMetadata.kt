@@ -31,6 +31,15 @@ internal const val MAX_ART_CACHE_ENTRIES = 8
 internal const val MAX_SNAPSHOT_CACHE_ENTRIES = 8
 
 /**
+ * How many times the inline artwork fetch may fail for ONE cover URL before the
+ * push latches it as applied anyway. Latching stops the 5 s poll re-fetching a
+ * hopeless URL forever; a small retry budget rescues the common transient case —
+ * the connect-in-a-parking-garage push whose art fetch timed out while the
+ * stream itself recovered.
+ */
+internal const val MAX_ART_FETCH_ATTEMPTS = 3
+
+/**
  * Normalised identity key matching an ICY StreamTitle to a cached `/api/now-playing`
  * snapshot: case- and whitespace-insensitive `artist|title`. Pure, JVM-tested.
  */
@@ -63,6 +72,36 @@ internal fun parseIcyStreamTitle(raw: String?): Pair<String?, String?>? {
  * Pure function, unit-tested on the plain JVM.
  */
 internal fun nowPlayingTuple(np: NowPlaying): Pair<String?, String?> = np.title to np.artist
+
+/**
+ * Case/whitespace-insensitive identity equality between two (title, artist)
+ * tuples, via [icyKey] — the SAME tolerance the snapshot matcher applies. The
+ * poll's art-upgrade gate needs this rather than `==`: after an ICY snapshot
+ * miss, [LiveMetadata.lastTuple] holds the ICY-parsed casing while the poll
+ * carries the API's casing; exact equality would block the art recovery for the
+ * whole track over pure formatting drift. Different TRACKS still never match —
+ * that protection (don't let a live-edge snapshot repaint a lagged playback
+ * position) is what the gate is for. Pure, JVM-tested.
+ */
+internal fun sameIdentity(a: Pair<String?, String?>?, b: Pair<String?, String?>?): Boolean =
+    a != null && b != null && icyKey(a.first, a.second) == icyKey(b.first, b.second)
+
+/**
+ * Whether a push that WANTED inline art should latch [LiveMetadata.lastAppliedArtUrl]
+ * afterwards. Latching means "done with this URL — stop re-applying it every poll
+ * tick"; not latching leaves the URL unapplied so the next tick retries the fetch.
+ * Latch on success, on no-URL, on a DEFINITIVE failure (oversized cover — retrying
+ * re-downloads megabytes for the same answer), or once the per-URL retry budget
+ * [MAX_ART_FETCH_ATTEMPTS] is spent (AA already holds the artworkUri from the
+ * first push, so a working head unit can still render the cover). Pure, JVM-tested.
+ */
+internal fun shouldLatchArt(
+    wantedUrl: String?,
+    gotBytes: Boolean,
+    definitive: Boolean,
+    failuresSoFar: Int,
+): Boolean =
+    wantedUrl == null || gotBytes || definitive || failuresSoFar >= MAX_ART_FETCH_ATTEMPTS
 
 /** What a metadata push should (re)write onto the live item. See [planMetaPush]. */
 internal data class MetaPlan(val setIdentity: Boolean, val setArt: Boolean) {
@@ -215,6 +254,14 @@ class LiveMetadata(
      */
     private var lastAppliedArtUrl: String? = null
 
+    /**
+     * Transient-failure tally for the ONE cover URL currently being retried (see
+     * [shouldLatchArt]). Reset when the URL changes or a fetch succeeds. Main-
+     * thread confined like the rest of the push state.
+     */
+    private var artFailUrl: String? = null
+    private var artFailures = 0
+
     private val artCache = ArtCache(MAX_ART_CACHE_ENTRIES)
 
     /** Live-edge snapshots for ICY matching — see [SnapshotCache]. */
@@ -270,6 +317,8 @@ class LiveMetadata(
         // re-proves ICY (see icySeen) instead of trusting a dead signal.
         lastTuple = null
         lastAppliedArtUrl = null
+        artFailUrl = null
+        artFailures = 0
         icySeen = false
         lastIcyRaw = null
     }
@@ -333,8 +382,11 @@ class LiveMetadata(
         // if the live-edge snapshot matches the displayed track and offers a cover we
         // haven't applied yet, apply it. This recovers art after an ICY snapshot-miss
         // (the cover the bare StreamTitle couldn't carry) and after a transient
-        // fetch failure — without ever moving identity off the ICY timing.
-        if (nowPlayingTuple(np) == lastTuple && np.artUrl != null && np.artUrl != lastAppliedArtUrl) {
+        // fetch failure — without ever moving identity off the ICY timing. The match
+        // is icyKey-tolerant (sameIdentity), NOT `==`: after a snapshot miss lastTuple
+        // carries the ICY string's casing/whitespace, and exact equality against the
+        // API's casing would lock the whole track out of art recovery.
+        if (sameIdentity(nowPlayingTuple(np), lastTuple) && np.artUrl != null && np.artUrl != lastAppliedArtUrl) {
             pushMeta(np, artKnown = true)
         }
     }
@@ -361,9 +413,10 @@ class LiveMetadata(
             if (plan.isNoop) return@withContext
 
             // Artwork bytes (fetchArtCached hops to IO and back), ONLY when we're
-            // (re)writing art. A null result — fetch failed, >1MB, 404 — still lets
+            // (re)writing art. Null bytes — fetch failed, >1MB, 404 — still let
             // AA render from artworkUri below. This is the sole suspension point.
-            val art = if (plan.setArt && np.artUrl != null) fetchArtCached(np.artUrl) else null
+            val fetch = if (plan.setArt && np.artUrl != null) fetchArtCached(np.artUrl) else null
+            val art = fetch?.bytes
 
             // Supersession guard: the art fetch suspended, so a NEWER identity (an
             // ICY track change applied by another push) may have landed meanwhile.
@@ -412,23 +465,47 @@ class LiveMetadata(
 
             // Commit state on Main (past the guard, so never for a superseded push).
             if (plan.setIdentity) lastTuple = tuple
-            // Mark art applied after this ONE attempt (success, or clear-to-null, or a
-            // failed inline whose URI we still set) so a permanently un-inlinable cover
-            // — >1MB, 404 — can't spin the poll re-applying it every tick; AA already
-            // has the URI from this pass. A genuinely new cover URL re-applies normally.
-            if (plan.setArt) lastAppliedArtUrl = np.artUrl
+            if (plan.setArt) {
+                // Latch means "done with this URL — stop re-applying it every tick".
+                // Success, a cleared cover (null URL), a definitive can't-inline
+                // (oversized), or a spent retry budget latch immediately; a TRANSIENT
+                // fetch failure does NOT — later poll ticks retry it (bounded, see
+                // shouldLatchArt). The old one-shot latch left a track artless for
+                // its whole runtime when the push raced a flaky connection (the
+                // parking-garage connect) and media3's own artworkUri load failed on
+                // the same dead network moment.
+                if (np.artUrl != artFailUrl) {
+                    artFailUrl = np.artUrl
+                    artFailures = 0
+                }
+                if (fetch != null && fetch.bytes == null && !fetch.definitive) artFailures++
+                if (shouldLatchArt(np.artUrl, art != null, fetch?.definitive == true, artFailures)) {
+                    lastAppliedArtUrl = np.artUrl
+                    artFailUrl = null
+                    artFailures = 0
+                }
+            }
         }
 
     /**
-     * Artwork bytes for [MediaMetadata.artworkData]: LRU-cached by URL; fetched via
-     * [StationApi.fetchArt] (2 MB download cap upstream); skipped — returning null,
-     * never failing the metadata push — when the image exceeds [MAX_METADATA_ART_BYTES].
+     * Inline-art fetch outcome. Null [bytes] with [definitive] = true means the
+     * cover can never inline (oversized) — a retry would re-download megabytes for
+     * the same answer. Null bytes with definitive = false is transient (network
+     * error, non-image body) and worth a bounded retry — see [shouldLatchArt].
      */
-    private suspend fun fetchArtCached(url: String): ByteArray? {
-        artCache.get(url)?.let { return it }
-        val bytes = api.fetchArt(url) ?: return null
-        if (bytes.size > MAX_METADATA_ART_BYTES) return null
+    private class ArtFetchResult(val bytes: ByteArray?, val definitive: Boolean)
+
+    /**
+     * Artwork bytes for [MediaMetadata.artworkData]: LRU-cached by URL; fetched via
+     * [StationApi.fetchArt] (2 MB download cap + image content-type guard upstream);
+     * skipped — null bytes, never failing the metadata push — when the image exceeds
+     * [MAX_METADATA_ART_BYTES].
+     */
+    private suspend fun fetchArtCached(url: String): ArtFetchResult {
+        artCache.get(url)?.let { return ArtFetchResult(it, definitive = true) }
+        val bytes = api.fetchArt(url) ?: return ArtFetchResult(null, definitive = false)
+        if (bytes.size > MAX_METADATA_ART_BYTES) return ArtFetchResult(null, definitive = true)
         artCache.put(url, bytes)
-        return bytes
+        return ArtFetchResult(bytes, definitive = true)
     }
 }

@@ -283,8 +283,33 @@ private fun MainScreen(controller: MediaController?) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
+
+            // App version — the first question in any field report ("which version
+            // are you on?"), answerable without digging through Android settings.
+            // Sideload distribution has no update channel, so this is the only
+            // fast way to tell a stale install from a real bug.
+            appVersionName(context)?.let { version ->
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = stringResource(R.string.app_version, version),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
+}
+
+/**
+ * The installed versionName via PackageManager (no BuildConfig dependency —
+ * the buildConfig feature isn't enabled). Null only if the package manager
+ * can't see our own package, which should never happen.
+ */
+private fun appVersionName(context: Context): String? = try {
+    @Suppress("DEPRECATION") // getPackageInfo(String, Int): fine for our own package
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName
+} catch (_: Exception) {
+    null
 }
 
 /**
