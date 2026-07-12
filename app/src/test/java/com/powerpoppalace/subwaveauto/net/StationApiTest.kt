@@ -256,6 +256,51 @@ class StationApiTest {
         assertNull(api.fetchArt("not a url at all"))
     }
 
+    @Test
+    fun fetchArt_jsonErrorBody_returnsNull() = runBlocking {
+        // Navidrome answers a MISSING cover with HTTP 200 + a Subsonic JSON error
+        // envelope; older controllers relay it verbatim. Those bytes must never
+        // become artworkData — an undecodable blob renders the track artless.
+        server.enqueue(
+            MockResponse()
+                .setBody("""{"subsonic-response":{"status":"failed","error":{"code":70,"message":"Artwork not found"}}}""")
+                .setHeader("Content-Type", "application/json"),
+        )
+        assertNull(api.fetchArt("$base/cover/missing-art"))
+    }
+
+    @Test
+    fun fetchArt_octetStreamAndMissingType_accepted() = runBlocking {
+        // Some servers omit Content-Type or say octet-stream for valid images —
+        // only an EXPLICIT non-image type is rejected.
+        val bytes = byteArrayOf(0x50, 0x4E, 0x47, 9, 9)
+        server.enqueue(
+            MockResponse()
+                .setBody(Buffer().write(bytes))
+                .setHeader("Content-Type", "application/octet-stream"),
+        )
+        assertArrayEquals(bytes, api.fetchArt("$base/cover/octet"))
+    }
+
+    // --- isLikelyImageContentType (pure) ---
+
+    @Test
+    fun imageContentType_acceptsImagesGenericAndAbsent() {
+        assertTrue(isLikelyImageContentType("image/webp"))
+        assertTrue(isLikelyImageContentType("IMAGE/JPEG; charset=binary")) // case + params
+        assertTrue(isLikelyImageContentType("application/octet-stream"))
+        assertTrue(isLikelyImageContentType(null))
+        assertTrue(isLikelyImageContentType(""))
+    }
+
+    @Test
+    fun imageContentType_rejectsDeclaredNonImages() {
+        assertFalse(isLikelyImageContentType("application/json"))
+        assertFalse(isLikelyImageContentType("application/json; charset=utf-8"))
+        assertFalse(isLikelyImageContentType("text/html"))
+        assertFalse(isLikelyImageContentType("text/plain; charset=utf-8"))
+    }
+
     // --- streamUrl ---
 
     @Test

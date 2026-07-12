@@ -88,6 +88,23 @@ keystore backup rules: [SIGNING.md](SIGNING.md).
 
 - **App not in the AA launcher** — confirm Unknown sources is ON (step 5);
   force-stop AA again (step 6); reboot the phone if it still hides.
+- **App WAS in the launcher but vanished later** (often after leaving the car
+  and reconnecting — gone from the launcher AND from Settings → Customize
+  launcher): this is Android Auto's app-inventory refresh, not an app bug. AA
+  rebuilds its list of valid apps from Play Store data, and a reconnect (or a
+  Google Play services / AA update) can purge sideloaded packages even with
+  Unknown sources on — a long-standing AA quirk. Recovery, in order:
+  1. Android Auto → Developer settings → confirm **Unknown sources** is still
+     ON (AA updates can silently reset it).
+  2. Settings → Apps → **Android Auto** → Storage → **Clear cache** (cache
+     only, not storage), then **Force stop**.
+  3. Reconnect to the car — the icon should be back in the launcher and in
+     Customize.
+  4. Still missing: reinstall the APK (same build is fine), then repeat 2.
+
+  The only durable fix is Play-Store distribution (e.g. an internal-testing
+  track) — a Play-known package is never purged and needs no Unknown-sources
+  toggle.
 - **adb sees no device / device "unauthorized"** — check the USB mode isn't
   charge-only, and accept the RSA prompt on the phone (step 2.3); replug if no
   prompt appears.

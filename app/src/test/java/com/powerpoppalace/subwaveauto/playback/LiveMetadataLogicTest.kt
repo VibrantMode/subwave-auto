@@ -218,6 +218,49 @@ class LiveMetadataLogicTest {
         assertTrue(!q.setArt)
     }
 
+    // --- sameIdentity: the poll's art-upgrade gate (icyKey tolerance) ---
+
+    @Test
+    fun sameIdentity_toleratesCaseAndWhitespaceDrift() {
+        // ICY pushed "the records - starry eyes"; the API snapshot carries canonical
+        // casing. The art-upgrade gate must still see them as the same track.
+        assertTrue(sameIdentity("Starry Eyes" to "The Records", "  starry eyes " to "THE RECORDS"))
+    }
+
+    @Test
+    fun sameIdentity_differentTracksNeverMatch() {
+        // The gate's protection: a live-edge snapshot for the NEXT track must not
+        // repaint identity/art while playback still lags on the previous one.
+        assertTrue(!sameIdentity("Teenarama" to "The Records", "Starry Eyes" to "The Records"))
+    }
+
+    @Test
+    fun sameIdentity_nullSidesNeverMatch() {
+        assertTrue(!sameIdentity(null, "Starry Eyes" to "The Records"))
+        assertTrue(!sameIdentity("Starry Eyes" to "The Records", null))
+        assertTrue(!sameIdentity(null, null))
+    }
+
+    // --- shouldLatchArt: bounded retry of a failed inline art fetch ---
+
+    @Test
+    fun latch_onSuccess_onClear_onDefinitive() {
+        assertTrue(shouldLatchArt("a/1.jpg", gotBytes = true, definitive = true, failuresSoFar = 0))
+        assertTrue(shouldLatchArt(null, gotBytes = false, definitive = false, failuresSoFar = 0)) // cleared cover
+        // Oversized cover: bytes refused deterministically — retrying re-downloads
+        // megabytes for the same answer, so latch immediately (AA has the URI).
+        assertTrue(shouldLatchArt("a/big.jpg", gotBytes = false, definitive = true, failuresSoFar = 1))
+    }
+
+    @Test
+    fun transientFailure_retriesUntilBudgetSpent() {
+        // Failures 1 and 2 leave the URL unlatched → the next poll tick retries.
+        assertTrue(!shouldLatchArt("a/1.jpg", gotBytes = false, definitive = false, failuresSoFar = 1))
+        assertTrue(!shouldLatchArt("a/1.jpg", gotBytes = false, definitive = false, failuresSoFar = 2))
+        // The MAX_ART_FETCH_ATTEMPTS-th failure gives up and latches.
+        assertTrue(shouldLatchArt("a/1.jpg", gotBytes = false, definitive = false, failuresSoFar = MAX_ART_FETCH_ATTEMPTS))
+    }
+
     // --- displayArtist: station branding on the artist line ---
 
     @Test
