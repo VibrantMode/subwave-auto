@@ -217,7 +217,7 @@ class StationApiTest {
     // --- fetchArt ---
 
     @Test
-    fun fetchArt_happyPath_returnsBytes() = runBlocking {
+    fun fetchArt_happyPath_returnsBytesAndMime() = runBlocking {
         val bytes = byteArrayOf(0x50, 0x4E, 0x47, 1, 2, 3, 4, 5)
         server.enqueue(
             MockResponse()
@@ -227,7 +227,8 @@ class StationApiTest {
 
         val got = api.fetchArt("$base/cover/1")
         assertNotNull(got)
-        assertArrayEquals(bytes, got)
+        assertArrayEquals(bytes, got!!.bytes)
+        assertEquals("image/png", got.mimeType)
     }
 
     @Test
@@ -270,16 +271,19 @@ class StationApiTest {
     }
 
     @Test
-    fun fetchArt_octetStreamAndMissingType_accepted() = runBlocking {
+    fun fetchArt_octetStreamAndMissingType_acceptedWithNullMime() = runBlocking {
         // Some servers omit Content-Type or say octet-stream for valid images —
-        // only an EXPLICIT non-image type is rejected.
+        // only an EXPLICIT non-image type is rejected. The generic type must NOT
+        // ride along as a trusted MIME (downstream storage would mislabel it).
         val bytes = byteArrayOf(0x50, 0x4E, 0x47, 9, 9)
         server.enqueue(
             MockResponse()
                 .setBody(Buffer().write(bytes))
                 .setHeader("Content-Type", "application/octet-stream"),
         )
-        assertArrayEquals(bytes, api.fetchArt("$base/cover/octet"))
+        val got = api.fetchArt("$base/cover/octet")
+        assertArrayEquals(bytes, got!!.bytes)
+        assertNull(got.mimeType)
     }
 
     // --- isLikelyImageContentType (pure) ---

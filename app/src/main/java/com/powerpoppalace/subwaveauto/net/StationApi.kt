@@ -61,12 +61,19 @@ class StationApi(
     }
 
     /**
-     * Fetch artwork bytes for `MediaMetadata.artworkData`. Null on any failure,
-     * including empty bodies and anything larger than [MAX_ART_BYTES] (~2 MB) —
-     * checked against Content-Length when declared, and enforced by capping the
-     * read for chunked/undeclared responses.
+     * A fetched cover: raw bytes + the response's image MIME type (null when the
+     * server omitted it or declared a generic type — the normalizer supplies a
+     * definitive type downstream).
      */
-    suspend fun fetchArt(url: String): ByteArray? = withContext(Dispatchers.IO) {
+    class FetchedArt(val bytes: ByteArray, val mimeType: String?)
+
+    /**
+     * Fetch artwork bytes for `MediaMetadata.artworkData` / the artwork store.
+     * Null on any failure, including empty bodies and anything larger than
+     * [MAX_ART_BYTES] (~2 MB) — checked against Content-Length when declared,
+     * and enforced by capping the read for chunked/undeclared responses.
+     */
+    suspend fun fetchArt(url: String): FetchedArt? = withContext(Dispatchers.IO) {
         try {
             val httpUrl = url.toHttpUrlOrNull() ?: return@withContext null
             val request = Request.Builder().url(httpUrl).get().build()
@@ -75,7 +82,8 @@ class StationApi(
                 // A 200 whose body isn't an image (JSON error envelope for a
                 // missing cover) must not become artwork bytes — see
                 // isLikelyImageContentType.
-                if (!isLikelyImageContentType(resp.header("Content-Type"))) return@withContext null
+                val contentType = resp.header("Content-Type")
+                if (!isLikelyImageContentType(contentType)) return@withContext null
                 val body = resp.body ?: return@withContext null
                 val declared = body.contentLength()
                 if (declared > MAX_ART_BYTES) return@withContext null
@@ -90,7 +98,15 @@ class StationApi(
                     if (total > MAX_ART_BYTES) return@withContext null
                     out.write(buf, 0, n)
                 }
-                if (total == 0L) null else out.toByteArray()
+                if (total == 0L) {
+                    null
+                } else {
+                    // Only a definitive image/* type rides along; octet-stream and
+                    // absent types stay null so downstream never trusts a guess.
+                    val mime = contentType?.substringBefore(';')?.trim()?.lowercase()
+                        ?.takeIf { it.startsWith("image/") }
+                    FetchedArt(out.toByteArray(), mime)
+                }
             }
         } catch (ce: CancellationException) {
             throw ce

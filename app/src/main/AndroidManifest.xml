@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -27,6 +28,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- v0.5: read-only cover-art provider — Android Auto's artwork contract
+             wants a LOCAL content:// URI, and this serves it. Deliberately
+             exported with no permission: the covers are a public station's
+             public art, metadata can't carry URI grants (it isn't an Intent),
+             and gearhead/systemui package names vary too much to allowlist.
+             The provider validates a strict v1/<sha256> path and refuses
+             every write. -->
+        <provider
+            android:name=".art.ArtworkProvider"
+            android:authorities="${applicationId}.art"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            tools:ignore="ExportedContentProvider" />
 
         <service
             android:name=".playback.PlaybackService"

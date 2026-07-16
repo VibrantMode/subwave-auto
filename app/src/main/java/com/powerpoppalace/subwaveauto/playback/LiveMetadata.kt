@@ -3,6 +3,11 @@ package com.powerpoppalace.subwaveauto.playback
 import android.net.Uri
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import com.powerpoppalace.subwaveauto.art.ArtDiagnostics
+import com.powerpoppalace.subwaveauto.art.ArtMode
+import com.powerpoppalace.subwaveauto.art.ArtNormalizer
+import com.powerpoppalace.subwaveauto.art.ArtworkStore
+import com.powerpoppalace.subwaveauto.art.planArtFields
 import com.powerpoppalace.subwaveauto.net.NowPlaying
 import com.powerpoppalace.subwaveauto.net.StationApi
 import kotlinx.coroutines.CancellationException
@@ -148,22 +153,30 @@ internal fun displayArtist(artist: String?, station: String?): String? = when {
 }
 
 /**
- * Tiny LRU byte cache keyed by artwork URL. LinkedHashMap in access order + an
+ * One cached cover, ready to publish either way: normalized inline bytes for
+ * `artworkData`, plus the [ArtworkStore] content URI (as a String — JVM-test
+ * friendly) for `artworkUri`. `contentUri` is null when the store write failed;
+ * the push then goes bytes-only rather than falling back to the remote URL.
+ */
+internal class CachedArt(val bytes: ByteArray, val contentUri: String?)
+
+/**
+ * Tiny LRU cache keyed by artwork URL. LinkedHashMap in access order + an
  * eldest-entry cap — no external deps. Synchronized because puts happen from IO
  * pollers while (hypothetically) reads could race; cheap at 8 entries.
  */
 internal class ArtCache(private val maxEntries: Int) {
-    private val map = object : LinkedHashMap<String, ByteArray>(maxEntries + 1, 1f, /* accessOrder = */ true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>): Boolean =
+    private val map = object : LinkedHashMap<String, CachedArt>(maxEntries + 1, 1f, /* accessOrder = */ true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedArt>): Boolean =
             size > maxEntries
     }
 
     @Synchronized
-    fun get(url: String): ByteArray? = map[url]
+    fun get(url: String): CachedArt? = map[url]
 
     @Synchronized
-    fun put(url: String, bytes: ByteArray) {
-        map[url] = bytes
+    fun put(url: String, art: CachedArt) {
+        map[url] = art
     }
 
     @Synchronized
@@ -230,10 +243,21 @@ internal class SnapshotCache(private val maxEntries: Int) {
  * @param scope  service-owned main-thread scope; cancelled in the service's onDestroy,
  *               which also kills any in-flight poll.
  */
-class LiveMetadata(
+internal class LiveMetadata(
     private val player: Player,
     var api: StationApi,
     private val scope: CoroutineScope,
+    /**
+     * v0.5: disk store behind [com.powerpoppalace.subwaveauto.art.ArtworkProvider] —
+     * the content:// URI Android Auto's artwork contract requires. Nullable only
+     * for plain-JVM tests of this class's pure helpers.
+     */
+    private val artStore: ArtworkStore? = null,
+    /**
+     * v0.5: active artwork publish mode, read fresh at every push so the hidden
+     * diagnostics switch takes effect at the next track change without a restart.
+     */
+    private val artMode: () -> ArtMode = { ArtMode.CONTENT_PLUS_DATA },
 ) {
 
     /** Active poll loop, non-null only while playing. */
@@ -412,11 +436,12 @@ class LiveMetadata(
             val plan = planMetaPush(tuple, plannedLast, artKnown, np.artUrl, lastAppliedArtUrl)
             if (plan.isNoop) return@withContext
 
-            // Artwork bytes (fetchArtCached hops to IO and back), ONLY when we're
-            // (re)writing art. Null bytes — fetch failed, >1MB, 404 — still let
-            // AA render from artworkUri below. This is the sole suspension point.
+            // Artwork (fetchArtCached hops to IO and back), ONLY when we're
+            // (re)writing art. A null result — fetch failed, >1MB, 404 — publishes
+            // artless this push; the bounded retry below re-fetches on later ticks.
+            // This is the sole suspension point.
             val fetch = if (plan.setArt && np.artUrl != null) fetchArtCached(np.artUrl) else null
-            val art = fetch?.bytes
+            val art = fetch?.art?.bytes
 
             // Supersession guard: the art fetch suspended, so a NEWER identity (an
             // ICY track change applied by another push) may have landed meanwhile.
@@ -440,17 +465,25 @@ class LiveMetadata(
                     .setStation(np.stationName)
             }
             if (plan.setArt) {
-                // artworkUri (the cover's HTTP URL) is the RELIABLE path on Android
-                // Auto: AA fetches it itself, so it isn't subject to the Binder
-                // transaction size limit that silently drops a large artworkData
-                // bitmap — and it rescues covers over MAX_METADATA_ART_BYTES that
-                // fetchArtCached refuses to inline. artworkData stays as the
-                // immediate/offline bitmap for the notification + BT/AVRCP. Set or
-                // clear BOTH (art/np.artUrl may be null) so a track with no cover
-                // doesn't keep the last one.
+                // v0.5: artworkUri is now the LOCAL content:// URI served by
+                // ArtworkProvider — Android Auto's documented artwork contract.
+                // (v0.4 set the remote HTTPS URL here; older gearhead builds
+                // permissively fetched it, newer ones — Pixels first — prefer the
+                // URI route and reject the scheme, rendering artless.) artworkData
+                // stays as the immediate/offline bitmap for the notification +
+                // BT/AVRCP. planArtFields maps the active (normally production)
+                // mode to the exact field combination; a track with no cover
+                // clears BOTH so it doesn't keep the last one.
+                val mode = artMode()
+                val fields = planArtFields(mode, fetch?.art?.contentUri, np.artUrl, art != null)
+                val artworkUri =
+                    if (np.artUrl == null) null
+                    else fields.uri?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                val artworkData = if (fields.includeData) art else null
                 meta.setAlbumTitle(np.album)
-                    .setArtworkData(art, if (art != null) MediaMetadata.PICTURE_TYPE_FRONT_COVER else null)
-                    .setArtworkUri(np.artUrl?.let { runCatching { Uri.parse(it) }.getOrNull() })
+                    .setArtworkData(artworkData, if (artworkData != null) MediaMetadata.PICTURE_TYPE_FRONT_COVER else null)
+                    .setArtworkUri(artworkUri)
+                ArtDiagnostics.recordPush(mode, artworkUri?.toString(), artworkData?.size)
             }
             // Same URI, new metadata → media3 keeps playback uninterrupted (the URI
             // is unchanged, so replaceMediaItem is a metadata-only update).
@@ -478,7 +511,7 @@ class LiveMetadata(
                     artFailUrl = np.artUrl
                     artFailures = 0
                 }
-                if (fetch != null && fetch.bytes == null && !fetch.definitive) artFailures++
+                if (fetch != null && fetch.art == null && !fetch.definitive) artFailures++
                 if (shouldLatchArt(np.artUrl, art != null, fetch?.definitive == true, artFailures)) {
                     lastAppliedArtUrl = np.artUrl
                     artFailUrl = null
@@ -488,24 +521,43 @@ class LiveMetadata(
         }
 
     /**
-     * Inline-art fetch outcome. Null [bytes] with [definitive] = true means the
-     * cover can never inline (oversized) — a retry would re-download megabytes for
-     * the same answer. Null bytes with definitive = false is transient (network
-     * error, non-image body) and worth a bounded retry — see [shouldLatchArt].
+     * Art fetch outcome. Null [art] with [definitive] = true means the cover can
+     * never be used (oversized AND undecodable) — a retry would re-download
+     * megabytes for the same answer. Null art with definitive = false is transient
+     * (network error, non-image body) and worth a bounded retry — see
+     * [shouldLatchArt].
      */
-    private class ArtFetchResult(val bytes: ByteArray?, val definitive: Boolean)
+    private class ArtFetchResult(val art: CachedArt?, val definitive: Boolean)
 
     /**
-     * Artwork bytes for [MediaMetadata.artworkData]: LRU-cached by URL; fetched via
-     * [StationApi.fetchArt] (2 MB download cap + image content-type guard upstream);
-     * skipped — null bytes, never failing the metadata push — when the image exceeds
-     * [MAX_METADATA_ART_BYTES].
+     * One publishable cover for [url]: LRU-cached; fetched via [StationApi.fetchArt]
+     * (2 MB download cap + image content-type guard), then NORMALIZED (≤320 px
+     * baseline JPEG — one small asset feeds both artworkData and the provider
+     * file) and persisted to [artStore] so the content:// URI resolves before the
+     * push publishes it. Normalization failure falls back to the original bytes;
+     * a failed store write yields a bytes-only [CachedArt] (never the remote URL).
      */
     private suspend fun fetchArtCached(url: String): ArtFetchResult {
         artCache.get(url)?.let { return ArtFetchResult(it, definitive = true) }
-        val bytes = api.fetchArt(url) ?: return ArtFetchResult(null, definitive = false)
-        if (bytes.size > MAX_METADATA_ART_BYTES) return ArtFetchResult(null, definitive = true)
-        artCache.put(url, bytes)
-        return ArtFetchResult(bytes, definitive = true)
+        val fetched = api.fetchArt(url)
+        if (fetched == null) {
+            ArtDiagnostics.recordFetch(url, ok = false, sizeBytes = 0, mime = null)
+            return ArtFetchResult(null, definitive = false)
+        }
+        ArtDiagnostics.recordFetch(url, ok = true, sizeBytes = fetched.bytes.size, mime = fetched.mimeType)
+        // Normalize on IO — BitmapFactory work has no business on Main.
+        val normalized = withContext(Dispatchers.IO) { ArtNormalizer.normalize(fetched.bytes) }
+        ArtDiagnostics.recordNormalize(fetched.bytes.size, normalized)
+        val publishBytes = normalized?.bytes ?: fetched.bytes
+        val publishMime = if (normalized != null) "image/jpeg" else fetched.mimeType
+        // Undecodable AND too big to inline → nothing usable, ever. (Normalized
+        // covers are ~10-40 KB, so this only fires on genuinely broken responses.)
+        if (publishBytes.size > MAX_METADATA_ART_BYTES) return ArtFetchResult(null, definitive = true)
+        val entry = withContext(Dispatchers.IO) { artStore?.put(publishBytes, publishMime) }
+        val contentUri = entry?.let { artStore?.uriFor(it)?.toString() }
+        ArtDiagnostics.recordStore(entry?.hash, contentUri)
+        val cached = CachedArt(publishBytes, contentUri)
+        artCache.put(url, cached)
+        return ArtFetchResult(cached, definitive = true)
     }
 }
