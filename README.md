@@ -39,6 +39,10 @@ operator path from build to "visible in the car".
   10-row acceptance matrix with results.
 - **[docs/DHU_NOTES.md](docs/DHU_NOTES.md)** — testing AA at the desk with the
   Desktop Head Unit (install facts, launch order, gotchas).
+- **[docs/ARTWORK_DIAGNOSTICS.md](docs/ARTWORK_DIAGNOSTICS.md)** — field
+  runbook for "no album art in the car" reports: the hidden diagnostics panel
+  (tap the version line 5×), the artwork-mode A/B switch, and the adb
+  collection steps.
 
 ## Signing
 

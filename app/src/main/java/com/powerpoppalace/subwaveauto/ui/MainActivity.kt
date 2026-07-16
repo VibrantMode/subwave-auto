@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -53,7 +55,10 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.powerpoppalace.subwaveauto.R
+import com.powerpoppalace.subwaveauto.art.ArtDiagnostics
+import com.powerpoppalace.subwaveauto.art.ArtMode
 import com.powerpoppalace.subwaveauto.prefs.StationPrefs
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -288,15 +293,82 @@ private fun MainScreen(controller: MediaController?) {
             // are you on?"), answerable without digging through Android settings.
             // Sideload distribution has no update channel, so this is the only
             // fast way to tell a stale install from a real bug.
+            // v0.5: five taps here toggles the hidden artwork-diagnostics panel
+            // (the field tool for the Pixel artwork reports).
+            var versionTaps by rememberSaveable { mutableStateOf(0) }
+            var diagnosticsVisible by rememberSaveable { mutableStateOf(false) }
             appVersionName(context)?.let { version ->
                 Spacer(Modifier.height(12.dp))
                 Text(
                     text = stringResource(R.string.app_version, version),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.clickable {
+                        versionTaps++
+                        if (versionTaps >= 5) {
+                            versionTaps = 0
+                            diagnosticsVisible = !diagnosticsVisible
+                        }
+                    },
                 )
             }
+
+            if (diagnosticsVisible) {
+                Spacer(Modifier.height(16.dp))
+                ArtDiagnosticsPanel()
+            }
         }
+    }
+}
+
+/**
+ * Hidden artwork-diagnostics panel (v0.5) — reached by tapping the version line
+ * five times. Two jobs, both for diagnosing artless Android Auto reports
+ * remotely: (1) switch the artwork PUBLISH MODE (which combination of
+ * content:// URI / inline bytes / remote URL rides the session metadata) so an
+ * affected user can tell us which route their gearhead build honors, and
+ * (2) show the live pipeline readout (fetch → normalize → store → push →
+ * provider) so one screenshot pinpoints the failing stage. Debug-only surface:
+ * literals instead of string resources on purpose.
+ */
+@Composable
+private fun ArtDiagnosticsPanel() {
+    val context = LocalContext.current
+    var mode by rememberSaveable { mutableStateOf(ArtMode.fromPref(StationPrefs.artMode(context)).prefValue) }
+    var readout by remember { mutableStateOf(ArtDiagnostics.render()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            readout = ArtDiagnostics.render()
+            delay(2_000)
+        }
+    }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text("Artwork diagnostics", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(4.dp))
+        ArtMode.entries.forEach { m ->
+            Text(
+                text = (if (m.prefValue == mode) "● " else "○ ") + m.label,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        StationPrefs.setArtMode(context, m.prefValue)
+                        mode = m.prefValue
+                    }
+                    .padding(vertical = 6.dp),
+            )
+        }
+        Text(
+            text = "Mode applies from the next track change.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = readout,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+        )
     }
 }
 

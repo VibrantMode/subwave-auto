@@ -14,6 +14,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.extractor.metadata.icy.IcyInfo
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
+import com.powerpoppalace.subwaveauto.art.ArtMode
+import com.powerpoppalace.subwaveauto.art.ArtworkStore
 import com.powerpoppalace.subwaveauto.net.StationApi
 import com.powerpoppalace.subwaveauto.prefs.StationPrefs
 import kotlinx.coroutines.CoroutineScope
@@ -102,7 +104,15 @@ class PlaybackService : MediaLibraryService() {
         browseTree = BrowseTree(stationApi)
         session = MediaLibrarySession.Builder(this, player, browseTree).build()
 
-        liveMetadata = LiveMetadata(player, stationApi, serviceScope)
+        // v0.5: covers persist through ArtworkStore and publish as content://
+        // URIs (ArtworkProvider) — AA's artwork contract. The mode lambda reads
+        // prefs fresh per push so the hidden diagnostics switch needs no restart.
+        liveMetadata = LiveMetadata(
+            player,
+            stationApi,
+            serviceScope,
+            ArtworkStore.get(this),
+        ) { ArtMode.fromPref(StationPrefs.artMode(this)) }
         liveMetadata.start()
         // ICY in-band metadata: ExoPlayer requests `Icy-MetaData: 1` on progressive
         // streams by default and surfaces IcyInfo at the PRESENTATION time of the

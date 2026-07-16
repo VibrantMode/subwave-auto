@@ -18,6 +18,10 @@ object StationPrefs {
     internal const val PREFS_FILE = "station"
     internal const val KEY_BASE_URL = "baseUrl"
 
+    /** v0.5 artwork publish mode (hidden diagnostics switch). Stored as the
+     *  ArtMode.prefValue string; unknown values read back as production. */
+    internal const val KEY_ART_MODE = "artMode"
+
     /**
      * Strong references to registered listeners. SharedPreferences holds its
      * listeners in a WeakHashMap, so without this list they would be GC'd and
@@ -41,6 +45,18 @@ object StationPrefs {
     fun setBaseUrl(ctx: Context, url: String) {
         val normalized = normalizeBaseUrl(url) ?: return
         prefs(ctx).edit().putString(KEY_BASE_URL, normalized).apply()
+    }
+
+    /**
+     * Raw artwork-mode pref value (null/garbage tolerated — readers map it via
+     * ArtMode.fromPref, which falls back to production). Read fresh per metadata
+     * push, so changes apply from the next track without a service restart.
+     */
+    fun artMode(ctx: Context): String? = prefs(ctx).getString(KEY_ART_MODE, null)
+
+    /** Persist an artwork mode (the caller passes a known ArtMode.prefValue). */
+    fun setArtMode(ctx: Context, value: String) {
+        prefs(ctx).edit().putString(KEY_ART_MODE, value).apply()
     }
 
     /**

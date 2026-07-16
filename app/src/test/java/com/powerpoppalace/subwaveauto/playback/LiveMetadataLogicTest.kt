@@ -56,31 +56,34 @@ class LiveMetadataLogicTest {
 
     // --- ArtCache: LRU, max 8 entries ---
 
+    private fun art(vararg bytes: Byte): CachedArt = CachedArt(bytes, contentUri = null)
+
     @Test
     fun artCache_missReturnsNull_hitReturnsBytes() {
         val cache = ArtCache(MAX_ART_CACHE_ENTRIES)
         assertNull(cache.get("https://a/missing.jpg"))
-        val bytes = byteArrayOf(1, 2, 3)
-        cache.put("https://a/1.jpg", bytes)
-        assertArrayEquals(bytes, cache.get("https://a/1.jpg"))
+        val cached = CachedArt(byteArrayOf(1, 2, 3), "content://x.art/v1/abc")
+        cache.put("https://a/1.jpg", cached)
+        assertArrayEquals(byteArrayOf(1, 2, 3), cache.get("https://a/1.jpg")?.bytes)
+        assertEquals("content://x.art/v1/abc", cache.get("https://a/1.jpg")?.contentUri)
     }
 
     @Test
     fun artCache_evictsEldestBeyondEightEntries() {
         val cache = ArtCache(MAX_ART_CACHE_ENTRIES)
-        for (i in 1..9) cache.put("https://a/$i.jpg", byteArrayOf(i.toByte()))
+        for (i in 1..9) cache.put("https://a/$i.jpg", art(i.toByte()))
         assertEquals(8, cache.size())
         assertNull(cache.get("https://a/1.jpg")) // eldest evicted
-        assertArrayEquals(byteArrayOf(9), cache.get("https://a/9.jpg"))
+        assertArrayEquals(byteArrayOf(9), cache.get("https://a/9.jpg")?.bytes)
     }
 
     @Test
     fun artCache_accessOrder_recentlyReadEntrySurvivesEviction() {
         val cache = ArtCache(MAX_ART_CACHE_ENTRIES)
-        for (i in 1..8) cache.put("https://a/$i.jpg", byteArrayOf(i.toByte()))
+        for (i in 1..8) cache.put("https://a/$i.jpg", art(i.toByte()))
         cache.get("https://a/1.jpg") // touch the eldest → now most-recently-used
-        cache.put("https://a/9.jpg", byteArrayOf(9))
-        assertArrayEquals(byteArrayOf(1), cache.get("https://a/1.jpg")) // survived
+        cache.put("https://a/9.jpg", art(9))
+        assertArrayEquals(byteArrayOf(1), cache.get("https://a/1.jpg")?.bytes) // survived
         assertNull(cache.get("https://a/2.jpg")) // the true LRU entry was evicted
         assertEquals(8, cache.size())
     }
